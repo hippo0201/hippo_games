@@ -63,7 +63,9 @@
         <li>天上会掉<b>阳光</b>，<b>向日葵</b>也能产阳光 —— 点击收集。</li>
         <li>先点种子槽里的植物，再点草坪格子种下（<b>向日葵 50</b> / <b>豌豆射手 100</b>）。</li>
         <li>僵尸一波波从右边开来，共 <b>12 波</b>，第 6 波和第 12 波是僵尸潮。</li>
+        <li>出怪<b>不随机</b>：每波的种类、走哪一行、什么时候进场都是固定的；僵尸进场前，那一行右侧会先亮起<b>红旗预警</b>。</li>
         <li>有任何一只僵尸走到草坪<b>最左边</b>，家就被攻破了。</li>
+        <li>点了<b>开始游戏</b>之后世界才开始运转 —— 暂停、结算页面里游戏是冻结的。</li>
       </ul>
       <button class="btn" id="btnStart">开 始 游 戏</button>
       <p class="keys">快捷键：<kbd>1</kbd> 向日葵 <kbd>2</kbd> 豌豆射手 <kbd>S</kbd> 铲子 <kbd>Esc</kbd> 取消 <kbd>空格</kbd> 暂停 <kbd>M</kbd> 静音</p>
@@ -105,9 +107,30 @@ const TOTAL_WAVES = 12;
 
 const SUN_VALUE      = 25;
 const SKY_SUN_FIRST  = 4;
-const SKY_SUN_EVERY  = 10;
+const SKY_SUN_EVERY  = 9;
 const FLOWER_FIRST   = 6;
 const FLOWER_EVERY   = 20;
+
+/* 天上掉阳光的固定落点（列, 行），按顺序循环 —— 不随机 */
+const SKY_SUN_SPOTS = [[4,1],[2,3],[6,0],[1,2],[7,3],[3,4],[5,1],[8,2],[0,3],[6,4]];
+
+/* 固定关卡表：B 普通 / C 路障 / K 铁桶 / R 疾跑，紧跟的行号（0 在最上），冒号后是该波内的秒数。
+   每波出场时间、种类、行、间隔全部写死，重开一模一样；同一行连续几只 = 需要预判的压线。 */
+const WAVE_SPEC = [
+  { at: 24,  seq:'B2:0 B0:8 B4:16' },
+  { at: 46,  seq:'B1:0 B3:8 B1:16' },
+  { at: 68,  seq:'B4:0 B0:8 C2:16 B3:24' },
+  { at: 92,  seq:'B1:0 R3:8 B2:16 C1:24 B0:32' },
+  { at:116,  seq:'B4:0 K2:8 B1:16 C4:24 B0:32 R3:40' },
+  { at:140,  big:1, seq:'B2:0 B2:2 B0:5 C0:7 B4:10 K4:12 B1:15 C1:17 R3:20 B3:23 C3:25' },
+  { at:166,  seq:'B1:0 B3:6 C2:12 K1:18 B4:24 R0:30' },
+  { at:192,  seq:'B0:0 B2:5 C4:10 K3:15 B1:20 C2:25 R4:30' },
+  { at:216,  seq:'B2:0 B2:4 C1:8 K4:12 B3:16 R1:20 B0:24 C2:28' },
+  { at:240,  seq:'B0:0 B1:4 B2:8 C3:12 K4:16 B0:20 R2:24 C1:28 K0:32' },
+  { at:264,  seq:'B1:0 B1:3 C2:6 K3:9 B4:12 R0:15 C1:18 B2:21 K2:24 C4:27 B3:30 K1:33 B1:36' },
+  { at:290,  big:1, seq:'K0:0 K1:2 B2:4 B3:6 K4:8 C0:11 C1:13 C2:15 C3:17 C4:19 B0:22 B1:24 B2:26 B3:28 B4:30 R2:33 R3:35 K1:38 B4:40 R1:42' }
+];
+const WAVE_TYPE = { B:'basic', C:'cone', K:'bucket', R:'runner' };
 
 const PEA_SPEED = 380, PEA_DMG = 20, FIRE_EVERY = 1.5;
 
@@ -136,7 +159,6 @@ const COL = {
 /* ------------------------------ 小工具 ------------------------------ */
 const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
 const rand  = (a,b) => a + Math.random() * (b - a);
-const randi = (a,b) => Math.floor(rand(a, b + 1));
 const lerp  = (a,b,t) => a + (b - a) * t;
 const hyp   = (x,y) => Math.sqrt(x*x + y*y);
 
@@ -218,12 +240,13 @@ function resetState(){
   state.spawnQueue = [];
   state.waves = buildWaves();
   state.waveNo = 0;          // 已开启的波数
+  state.queued = 0;          // 已排进出场队列的波数（提前 6 秒排队）
   state.nextSkySun = SKY_SUN_FIRST;
   state.selected = null;      // 选中的植物 key
   state.shovel = false;
   state.cooldown = { sunflower:0, peashooter:0 };
-  state.paused = false;
-  state.over = false;
+  state.phase = 'menu';       // menu | playing | paused | over —— 只有 playing 会推进
+  state.skySunIndex = 0;
   state.result = null;
   state.banner = null;        // {text, until}
   state.shake = 0;
@@ -232,22 +255,20 @@ function resetState(){
 }
 
 function buildWaves(){
-  const waves = [];
-  for (let i=1; i<=TOTAL_WAVES; i++){
-    const big = (i === 6 || i === TOTAL_WAVES);
-    const count = Math.round(1.6 + i * 0.8) * (big ? 2 : 1);
-    const list = [];
-    for (let j=0; j<count; j++){
-      const roll = Math.random();
-      let type = 'basic';
-      if (i >= 3 && roll > 0.80) type = 'cone';
-      if (i >= 5 && roll > 0.93) type = 'bucket';
-      if (i >= 4 && roll < 0.10) type = 'runner';
-      list.push({ type, row: randi(0, ROWS-1), delay: j * (big ? 0.85 : 1.9) + Math.random()*0.9 });
-    }
-    waves.push({ no:i, big, list, at: 20 + (i-1) * 23 });
-  }
-  return waves;
+  /* 完全按 WAVE_SPEC 展开，不含任何随机 */
+  return WAVE_SPEC.map((w, i) => ({
+    no: i + 1,
+    big: !!w.big,
+    at: w.at,
+    list: w.seq.trim().split(/\s+/).map(tok => {
+      const parts = tok.split(':');
+      return {
+        type: WAVE_TYPE[parts[0][0]],
+        row: Number(parts[0][1]) % ROWS,
+        delay: Number(parts[1]) || 0
+      };
+    })
+  }));
 }
 
 /* ------------------------------ 实体工厂 ------------------------------ */
@@ -266,7 +287,7 @@ function makeZombie(type, row){
   const def = ZOMBIE_DEFS[type];
   const scale = def.scale;
   const z = {
-    type, def, row, x: SPAWN_X + rand(0, 70), y: GRID_Y + row*CELL + CELL/2,
+    type, def, row, x: SPAWN_X, y: GRID_Y + row*CELL + CELL/2,
     hp: def.hp, maxHp: def.hp, armor: def.armor, maxArmor: def.armor,
     speed: def.speed * scale, scale,
     anim: rand(0, 6.28), eatTimer: 0, eating: null,
@@ -284,7 +305,7 @@ function makePea(row, x, y){
 function spawnSun(x, y, targetY, source){
   state.suns.push({
     x, y, targetY,
-    vx: source === 'flower' ? rand(-22, 22) : 0,
+    vx: source === 'flower' ? 26 : 0,
     vy: source === 'flower' ? -175 : 70,
     rest: source === 'flower' ? 7 : 0,
     landed: false,
@@ -378,11 +399,17 @@ function collectSunAt(p){
 function onPointerDown(e){
   e.preventDefault();
   Sfx.init(); Sfx.resume();
-  if (state.paused || state.over) return;
   const p = toLogical(e);
-  state.hover.x = p.x; state.hover.y = p.y;
 
-  if (p.y < HUD_H){ const b = hitBtn(p); if (b){ handleHud(b); return; } }
+  // 顶栏按钮：菜单/结算下全部禁用；暂停下只允许暂停和静音两个按钮
+  if (p.y < HUD_H){
+    const b = hitBtn(p);
+    const allowed = b && (state.phase === 'playing' ||
+      (state.phase === 'paused' && (b.id === 'pause' || b.id === 'mute')));
+    if (allowed){ handleHud(b); return; }
+  }
+  if (state.phase !== 'playing') return;      // 菜单/暂停/结算页面下，画布不接收任何操作
+  state.hover.x = p.x; state.hover.y = p.y;
 
   // 阳光优先收集
   if (collectSunAt(p)) return;
@@ -396,7 +423,8 @@ function onPointerDown(e){
 function onPointerMove(e){
   const p = toLogical(e);
   state.hover.x = p.x; state.hover.y = p.y;
-  state.hover.cell = (p.y >= GRID_Y && p.y < GRID_Y+GRID_H) ? cellFromPoint(p.x, p.y) : null;
+  state.hover.cell = (state.phase === 'playing' && p.y >= GRID_Y && p.y < GRID_Y+GRID_H)
+    ? cellFromPoint(p.x, p.y) : null;
 }
 
 function toLogical(e){
@@ -406,9 +434,13 @@ function toLogical(e){
 
 function onKey(e){
   const k = e.key;
-  if (k === ' ' || k === 'p' || k === 'P'){ togglePause(); e.preventDefault(); return; }
   if (k === 'm' || k === 'M'){ Sfx.on = !Sfx.on; return; }
-  if (state.paused || state.over) return;
+  if (k === ' ' || k === 'p' || k === 'P'){
+    e.preventDefault();
+    if (state.phase === 'playing' || state.phase === 'paused') togglePause();
+    return;
+  }
+  if (state.phase !== 'playing') return;
   if (k === '1') trySelectSeed('sunflower');
   else if (k === '2') trySelectSeed('peashooter');
   else if (k === 's' || k === 'S'){ state.shovel = !state.shovel; state.selected = null; }
@@ -443,29 +475,33 @@ function update(dt){
     if (z.dying <= 0 && z.x <= LOSE_X){ endGame(false, z); break; }
   }
   // 胜利判定
-  if (!state.over && state.waveNo >= TOTAL_WAVES && state.spawnQueue.length === 0 &&
+  if (state.phase === 'playing' && state.waveNo >= TOTAL_WAVES && state.spawnQueue.length === 0 &&
       state.zombies.filter(z => z.dying <= 0).length === 0){
     endGame(true);
   }
 }
 
 function updateWaves(dt){
-  // 开启新波
-  while (state.waveNo < TOTAL_WAVES){
-    const w = state.waves[state.waveNo];
-    if (state.time >= w.at){
-      state.waveNo++;
-      for (const it of w.list) state.spawnQueue.push({ ...it, at: state.time + it.delay });
-      if (w.big){ state.banner = { text:'一大波僵尸正在接近！', until: state.time + 3.2, big:true }; Sfx.wave(); }
-      else { state.banner = { text:'第 ' + w.no + ' 波僵尸', until: state.time + 1.6 }; Sfx.wave(); }
-    } else {
-      // 大波预警
-      if (w.big && state.time > w.at - 3.5 && !state.banner)
-        state.banner = { text:'一大波僵尸正在接近！', until: w.at, big:true };
-      break;
-    }
+  // 1) 提前 6 秒把整波僵尸排进队列，这样每波第一只也有预警旗
+  while (state.queued < TOTAL_WAVES && state.time >= state.waves[state.queued].at - 6){
+    const w = state.waves[state.queued];
+    for (const it of w.list) state.spawnQueue.push({ type:it.type, row:it.row, at: w.at + it.delay });
+    state.queued++;
   }
-  // 出怪
+  // 2) 到点正式开启波次：弹提示 + 号角
+  while (state.waveNo < TOTAL_WAVES && state.time >= state.waves[state.waveNo].at){
+    const w = state.waves[state.waveNo];
+    state.waveNo++;
+    state.banner = w.big
+      ? { text:'一大波僵尸正在接近！', until: state.time + 3.2, big:true }
+      : { text:'第 ' + w.no + ' 波僵尸', until: state.time + 1.6 };
+    Sfx.wave();
+  }
+  // 3) 僵尸潮提前 3.5 秒的预警
+  const next = state.waves[state.waveNo];
+  if (next && next.big && state.time > next.at - 3.5 && !state.banner)
+    state.banner = { text:'一大波僵尸正在接近！', until: next.at, big:true };
+  // 4) 出怪
   for (let i=state.spawnQueue.length-1;i>=0;i--){
     const s = state.spawnQueue[i];
     if (state.time >= s.at){ state.zombies.push(makeZombie(s.type, s.row)); state.spawnQueue.splice(i,1); }
@@ -475,10 +511,10 @@ function updateWaves(dt){
 function updateSkySun(dt){
   if (state.time >= state.nextSkySun){
     state.nextSkySun = state.time + SKY_SUN_EVERY;
-    const c = randi(0, COLS-1), r = randi(0, ROWS-1);
-    const pos = cellCenter(r, c);
-    const x = pos.x + rand(-26, 26);
-    spawnSun(x, HUD_H - 6, rand(pos.y - 10, pos.y + 24), 'sky');
+    const spot = SKY_SUN_SPOTS[state.skySunIndex % SKY_SUN_SPOTS.length];
+    state.skySunIndex++;
+    const pos = cellCenter(spot[1], spot[0]);
+    spawnSun(pos.x, HUD_H - 6, pos.y + 6, 'sky');
   }
 }
 
@@ -491,7 +527,7 @@ function updatePlants(dt){
     if (p.timer > 0) continue;
     if (p.def.kind === 'sun'){
       p.timer = FLOWER_EVERY;
-      spawnSun(p.x + 16, p.y - 18, p.y + rand(18, 28), 'flower');
+      spawnSun(p.x + 18, p.y - 16, p.y + 22, 'flower');
       Sfx.pop();
     } else {
       p.timer = FIRE_EVERY;
@@ -615,8 +651,8 @@ function updateParticles(dt){
 }
 
 function endGame(won, byZombie){
-  if (state.over) return;
-  state.over = true;
+  if (state.phase !== 'playing') return;
+  state.phase = 'over';
   state.selected = null; state.shovel = false;
   if (won){ state.result = 'win'; Sfx.win(); }
   else {
@@ -807,6 +843,7 @@ function drawPlantTimer(p, x, y){
 }
 
 function drawGhostPlant(){
+  if (state.phase !== 'playing') return;
   if (!state.selected || !state.hover.cell) return;
   const { r, c } = state.hover.cell;
   if (state.plants.some(p => p.r===r && p.c===c)) return;
@@ -1111,7 +1148,7 @@ function iconButton(b, kind){
   const cx = b.x + b.w/2, cy = b.y + b.h/2;
   ctx.fillStyle = '#ffe9b8';
   if (kind === 'pause'){
-    if (state.paused){
+    if (state.phase === 'paused'){
       ctx.beginPath(); ctx.moveTo(cx-7, cy-9); ctx.lineTo(cx+9, cy); ctx.lineTo(cx-7, cy+9); ctx.closePath(); ctx.fill();
     } else {
       ctx.fillRect(cx-8, cy-9, 5, 18); ctx.fillRect(cx+3, cy-9, 5, 18);
@@ -1135,7 +1172,9 @@ function iconButton(b, kind){
 function drawProgressBar(){
   const y = 606, x = GRID_X, w = GRID_W;
   ctx.fillStyle = 'rgba(0,0,0,.35)'; rr(x, y, w, 16, 8); ctx.fill();
-  const t0 = state.waves[0].at, tEnd = state.waves[TOTAL_WAVES-1].at + 10;
+  const t0 = state.waves[0].at, lastW = state.waves[TOTAL_WAVES-1];
+  const lastDelay = lastW.list.reduce((m, zz) => Math.max(m, zz.delay), 0);
+  const tEnd = lastW.at + lastDelay + 12;
   const done = clamp((state.time - t0) / (tEnd - t0), 0, 1);
   const g = ctx.createLinearGradient(x, 0, x+w, 0);
   g.addColorStop(0,'#7ac94a'); g.addColorStop(1,'#e0c341');
@@ -1195,6 +1234,31 @@ function drawBanner(){
   ctx.restore();
 }
 
+/* 出怪预警旗：某行 2.6 秒内要有僵尸进场时，在右侧人行道先亮一面红旗 */
+function drawWaveFlags(){
+  if (state.phase !== 'playing') return;
+  const lead = 2.6, soonest = {};
+  for (const s of state.spawnQueue){
+    const d = s.at - state.time;
+    if (d < 0 || d > lead) continue;
+    if (soonest[s.row] === undefined || d < soonest[s.row]) soonest[s.row] = d;
+  }
+  for (const key in soonest){
+    const r = Number(key), d = soonest[key];
+    const y = GRID_Y + r*CELL + CELL/2;
+    const fx = GRID_X + GRID_W + 26;
+    ctx.save();
+    ctx.globalAlpha = clamp((1 - d/lead) * (0.65 + 0.35*Math.sin(state.time*9)), 0.1, 1);
+    ctx.strokeStyle = '#3a2a16'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(fx, y + 26); ctx.lineTo(fx, y - 26); ctx.stroke();
+    ctx.fillStyle = '#e0402c';
+    ctx.beginPath();
+    ctx.moveTo(fx, y - 26); ctx.lineTo(fx + 34, y - 18); ctx.lineTo(fx, y - 10);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+}
+
 /* ------------------------------ 主渲染 ------------------------------ */
 function render(){
   ctx.clearRect(0,0,W,H);
@@ -1220,6 +1284,7 @@ function render(){
   drawParticles();
   ctx.restore();
 
+  drawWaveFlags();
   drawHud();
   drawProgressBar();
   drawBanner();
@@ -1228,7 +1293,7 @@ function render(){
     ctx.fillStyle = `rgba(200,30,30,${state.flash*0.35})`;
     ctx.fillRect(0,0,W,H);
   }
-  if (state.paused && !state.over){
+  if (state.phase === 'paused'){
     ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0,HUD_H,W,H-HUD_H);
   }
 }
@@ -1240,15 +1305,17 @@ function frame(ts){
   if (!last) last = ts;
   let dt = (ts - last) / 1000; last = ts;
   if (dt > 0.1) dt = 0.1;
-  if (!state.paused && !state.over) update(dt);
-  else if (state.over) updateParticles(dt);
+  // 只有 playing 阶段推进世界；menu/paused/over 全部冻结（over 只让粒子飘完）
+  if (state.phase === 'playing') update(dt);
+  else if (state.phase === 'over') updateParticles(dt);
   render();
 }
 
 function togglePause(){
-  if (state.over) return;
-  state.paused = !state.paused;
-  document.getElementById('pauseScreen').classList.toggle('hidden', !state.paused);
+  if (state.phase === 'playing') state.phase = 'paused';
+  else if (state.phase === 'paused') state.phase = 'playing';
+  else return;                       // 菜单和结算页面不允许切换暂停
+  document.getElementById('pauseScreen').classList.toggle('hidden', state.phase !== 'paused');
   Sfx.click();
 }
 
@@ -1264,6 +1331,7 @@ function showEnd(won){
 
 function startGame(){
   resetState();
+  state.phase = 'playing';      // 只有点了「开始游戏 / 再来一局」，世界才开始推进
   document.getElementById('startScreen').classList.add('hidden');
   document.getElementById('endScreen').classList.add('hidden');
   document.getElementById('pauseScreen').classList.add('hidden');
@@ -1297,7 +1365,7 @@ function boot(){
   window.addEventListener('keydown', onKey);
   document.getElementById('btnStart').addEventListener('click', () => { startGame(); });
   document.getElementById('btnRestart').addEventListener('click', () => { startGame(); });
-  document.getElementById('btnRestart2').addEventListener('click', () => { state.paused = false; startGame(); });
+  document.getElementById('btnRestart2').addEventListener('click', () => { startGame(); });
   document.getElementById('btnResume').addEventListener('click', () => { togglePause(); });
   requestAnimationFrame(frame);
 }
