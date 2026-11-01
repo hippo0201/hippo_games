@@ -276,7 +276,7 @@ function makePlant(key, r, c){
   const def = PLANT_DEFS[key];
   const p = {
     key, def, r, c, hp: def.hp, maxHp: def.hp,
-    born: state.time, anim: rand(0, 6.28), recoil: 0, flash: 0
+    born: state.time, anim: rand(0, 6.28), recoil: 0, pop: 0, flash: 0
   };
   const pos = cellCenter(r, c); p.x = pos.x; p.y = pos.y;
   p.timer = def.kind === 'sun' ? FLOWER_FIRST : 0.7;
@@ -522,11 +522,13 @@ function updatePlants(dt){
   for (const p of state.plants){
     p.anim += dt;
     p.recoil = Math.max(0, p.recoil - dt*3);
+    p.pop = Math.max(0, (p.pop || 0) - dt*3.2);
     p.flash = Math.max(0, p.flash - dt*3);
     p.timer -= dt;
     if (p.timer > 0) continue;
     if (p.def.kind === 'sun'){
       p.timer = FLOWER_EVERY;
+      p.pop = 1;
       spawnSun(p.x + 18, p.y - 16, p.y + 22, 'flower');
       Sfx.pop();
     } else {
@@ -747,98 +749,211 @@ function drawLawn(){
   ctx.restore();
 }
 
-/* ------------------------------ 绘制：植物 ------------------------------ */
+/* ------------------------------ 精灵渐变缓存 ------------------------------
+   所有形状都在固定的局部坐标系里画（植物原点=格子中心，僵尸原点=脚底），
+   所以渐变只需按局部坐标建一次，靠 ctx.translate 复用，不必每帧重建。 */
+const Gr = {};
+function buildGradients(){
+  const lg = (x0,y0,x1,y1, stops) => {
+    const g = ctx.createLinearGradient(x0,y0,x1,y1);
+    for (const st of stops) g.addColorStop(st[0], st[1]);
+    return g;
+  };
+  const rg = (x0,y0,r0,x1,y1,r1, stops) => {
+    const g = ctx.createRadialGradient(x0,y0,r0,x1,y1,r1);
+    for (const st of stops) g.addColorStop(st[0], st[1]);
+    return g;
+  };
+
+  Gr.stem    = lg(-2,30, 2,-6, [[0,'#3f9a22'],[0.5,'#5cb932'],[1,'#4aa427']]);
+  Gr.leaf    = lg(0,-7, 0,7,   [[0,'#95e661'],[0.55,'#57bb34'],[1,'#3d9c22']]);
+  Gr.soil    = lg(0,22, 0,37,  [[0,'#8d6839'],[1,'#5b4022']]);
+
+  Gr.petalF  = lg(0,-9, 0,-30, [[0,'#fff5b0'],[0.42,'#ffd648'],[1,'#ffab2e']]);
+  Gr.petalB  = lg(0,-9, 0,-30, [[0,'#ffca4c'],[1,'#f2931f']]);
+  Gr.core    = rg(-4,-5,1, 0,0,16, [[0,'#cd9860'],[0.5,'#9d6a33'],[1,'#70461a']]);
+
+  Gr.peaHead  = rg(-6,-7,2, 0,0,22, [[0,'#e2ffb0'],[0.42,'#8ede52'],[0.8,'#57b02c'],[1,'#409421']]);
+  Gr.peaSnout = lg(10,-9, 26,8, [[0,'#a9ec70'],[0.55,'#6cbb38'],[1,'#489424']]);
+  Gr.peaCollar= lg(0,-15, 0,11, [[0,'#74c945'],[1,'#3d9122']]);
+
+  Gr.zSkin  = rg(-5,-6,2, 0,0,21, [[0,'#e2f6bc'],[0.45,'#b8dd90'],[1,'#8ab768']]);
+  Gr.zCoat  = lg(0,-15, 0,15, [[0,'#a3afbd'],[0.5,'#84909f'],[1,'#626e7d']]);
+  Gr.zShirt = lg(0,-14, 0,4,  [[0,'#fffdf4'],[1,'#dedac9']]);
+  Gr.cone   = lg(-12,0, 10,-2, [[0,'#ffbe57'],[0.4,'#f88424'],[1,'#dd6512']]);
+  Gr.bucket = lg(-14,0, 12,0,  [[0,'#a4b4c1'],[0.2,'#f2f8fc'],[0.5,'#c6d4de'],[0.78,'#8e9da8'],[1,'#6d7c87']]);
+  Gr.rim    = lg(0,-15, 0,-9,  [[0,'#f0f6fa'],[1,'#8e9da8']]);
+  Gr.peaBall= rg(-2.5,-3,1, 0,0,9.5, [[0,'#f2ffcb'],[0.45,'#9ee65c'],[1,'#529f26']]);
+}
+
+/* ------------------------------ 绘制：植物（Q 版） ------------------------------ */
 function drawPlantBody(p, alpha=1){
-  const sway = Math.sin(state.time*2.2 + p.anim) * 2.4;
+  const sway = Math.sin(state.time*2.0 + p.anim) * 2.0;
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.translate(p.x, p.y);
 
-  // 阴影
-  ctx.fillStyle = 'rgba(0,0,0,.22)'; ell(0, 32, 22, 8); ctx.fill();
-
-  // 花盆/草丛底座
-  ctx.fillStyle = '#4a3a22'; ell(0, 30, 20, 8); ctx.fill();
-  ctx.fillStyle = COL.stemDark;
-  ctx.beginPath();
-  ctx.moveTo(-16, 30); ctx.quadraticCurveTo(-6, 8, -1, 12); ctx.quadraticCurveTo(4, 6, 14, 30);
-  ctx.closePath(); ctx.fill();
+  // 软软的落地影 + 小土丘
+  ctx.fillStyle = 'rgba(0,0,0,.12)'; ell(0, 34.5, 25, 8.5); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.15)'; ell(0, 33, 16, 5.5); ctx.fill();
+  ctx.fillStyle = Gr.soil; ell(0, 30.5, 18, 7); ctx.fill();
+  ctx.strokeStyle = 'rgba(96,64,26,.5)'; ctx.lineWidth = 1.6; ell(0,30.5,18,7); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.18)'; ell(-5, 28.5, 8, 2.4); ctx.fill();
 
   if (p.key === 'sunflower') drawSunflower(sway, p);
   else drawPeashooter(sway, p);
 
   if (p.flash > 0){
-    ctx.fillStyle = `rgba(255,80,80,${0.35*p.flash})`;
-    ell(0, -4, 30, 34); ctx.fill();
+    ctx.fillStyle = `rgba(255,120,100,${0.4*p.flash})`;
+    ell(0, -2, 28, 34); ctx.fill();
   }
   ctx.restore();
 }
 
-function drawSunflower(sway, p){
-  const bob = Math.sin(state.time*2.6 + p.anim)*1.6;
-  // 茎
-  ctx.strokeStyle = COL.stem; ctx.lineWidth = 7; ctx.lineCap='round';
-  ctx.beginPath(); ctx.moveTo(0, 28); ctx.quadraticCurveTo(sway*0.6, 6, sway, -6 + bob); ctx.stroke();
-  // 叶
-  ctx.fillStyle = COL.leaf;
-  ctx.save(); ctx.translate(-10, 16); ctx.rotate(-0.5 + sway*0.02);
-  ell(0,0,12,6); ctx.fill(); ctx.restore();
-  ctx.save(); ctx.translate(11, 20); ctx.rotate(0.45);
-  ell(0,0,11,6); ctx.fill(); ctx.restore();
+/* 圆滚滚的叶子 */
+function drawLeaf(x, y, rot, len){
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  ctx.fillStyle = Gr.leaf;
+  ell(len*0.55, 0, len*0.55, len*0.4); ctx.fill();
+  ctx.strokeStyle = '#3a8c22'; ctx.lineWidth = 1.8; ell(len*0.55, 0, len*0.55, len*0.4); ctx.stroke();
+  ctx.strokeStyle = 'rgba(40,110,25,.4)'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(len*0.18, 0); ctx.lineTo(len*0.9, 0); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.3)'; ell(len*0.42, -len*0.17, len*0.22, len*0.09); ctx.fill();
+  ctx.restore();
+}
 
-  const hx = sway, hy = -14 + bob;
-  // 花瓣
-  const petals = 12;
-  for (let i=0;i<petals;i++){
-    const a = i/petals*Math.PI*2 + state.time*0.25;
-    ctx.save(); ctx.translate(hx, hy); ctx.rotate(a);
-    ctx.fillStyle = i%2 ? '#ffd23c' : '#ffbf20';
-    ell(0,-21,6,11); ctx.fill();
+function drawStem(topX, topY, sway){
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = Gr.stem; ctx.lineWidth = 9;
+  ctx.beginPath(); ctx.moveTo(0, 30); ctx.quadraticCurveTo(sway*0.45, 12, topX, topY); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.26)'; ctx.lineWidth = 2.4;
+  ctx.beginPath(); ctx.moveTo(-2.6, 28); ctx.quadraticCurveTo(sway*0.45-2.6, 12, topX-2.2, topY); ctx.stroke();
+}
+
+/* 圆润的花瓣环 */
+function petalRing(n, r0, r1, rot, style, edge){
+  for (let i=0;i<n;i++){
+    ctx.save(); ctx.rotate(rot + i/n*Math.PI*2);
+    ctx.beginPath();
+    ctx.moveTo(0, -r0);
+    ctx.quadraticCurveTo(-6.8, -(r0*0.5 + r1*0.5), -4.6, -r1 + 2.4);
+    ctx.quadraticCurveTo(0, -r1 - 2.6, 4.6, -r1 + 2.4);
+    ctx.quadraticCurveTo(6.8, -(r0*0.5 + r1*0.5), 0, -r0);
+    ctx.closePath();
+    ctx.fillStyle = style; ctx.fill();
+    if (edge){ ctx.strokeStyle = edge; ctx.lineWidth = 1.4; ctx.stroke(); }
     ctx.restore();
   }
-  // 花心
-  ctx.fillStyle = '#8a5a24'; ell(hx, hy, 13, 12); ctx.fill();
-  ctx.fillStyle = '#a86b2c'; ell(hx, hy-1, 10, 9); ctx.fill();
-  // 脸
-  ctx.fillStyle = '#2c2015';
-  ell(hx-4, hy-2, 1.9, 2.4); ctx.fill();
-  ell(hx+4, hy-2, 1.9, 2.4); ctx.fill();
-  ctx.strokeStyle='#2c2015'; ctx.lineWidth=1.6;
-  ctx.beginPath(); ctx.arc(hx, hy+3, 4.5, 0.15*Math.PI, 0.85*Math.PI); ctx.stroke();
+}
 
-  // 产出倒计时小点
-  drawPlantTimer(p, hx, hy - 30);
+/* 大眼 + 高光 + 腮红 + 小猫嘴 */
+function drawCartoonFace(cx, cy, p, scl, lookRight){
+  const blink = ((state.time*0.9 + p.anim) % 4.6) > 4.35;
+  const dx = lookRight ? 0.9 : 0;
+  ctx.save(); ctx.translate(cx, cy); ctx.scale(scl, scl);
+  ctx.fillStyle = '#fffdf2';
+  ell(-5.2, -1.4, 4.3, blink ? 0.9 : 5.0); ctx.fill();
+  ell( 5.2, -1.4, 4.3, blink ? 0.9 : 5.0); ctx.fill();
+  if (!blink){
+    ctx.fillStyle = '#3a3227';
+    ell(-5.2 + dx, -0.9, 2.8, 3.3); ctx.fill();
+    ell( 5.2 + dx, -0.9, 2.8, 3.3); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ell(-6.4 + dx, -2.6, 1.3, 1.4); ctx.fill();
+    ell( 4.0 + dx, -2.6, 1.3, 1.4); ctx.fill();
+    ell(-4.2 + dx, 0.8, 0.7, 0.8); ctx.fill();
+    ell( 6.2 + dx, 0.8, 0.7, 0.8); ctx.fill();
+  }
+  ctx.strokeStyle = 'rgba(60,40,16,.85)'; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(-5.2, -7.4, 4.6, 1.16*Math.PI, 1.84*Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.arc( 5.2, -7.4, 4.6, 1.16*Math.PI, 1.84*Math.PI); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,120,105,.38)';
+  ell(-10, 3.6, 3.1, 2.0); ctx.fill();
+  ell( 10, 3.6, 3.1, 2.0); ctx.fill();
+  ctx.strokeStyle = '#4a3a1c'; ctx.lineWidth = 1.7;
+  ctx.beginPath(); ctx.arc(-2.0, 3.0, 2.2, 0.1*Math.PI, 0.9*Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.arc( 2.0, 3.0, 2.2, 0.1*Math.PI, 0.9*Math.PI); ctx.stroke();
+  ctx.restore();
+}
+
+function drawSunflower(sway, p){
+  const bob = Math.sin(state.time*2.4 + p.anim) * 1.8;
+  const pop = p.pop || 0;
+  drawStem(sway, -6 + bob, sway);
+  drawLeaf(-7, 18, -0.5 + sway*0.02, 14);
+  drawLeaf(8, 22, 0.55 - sway*0.02, 13);
+
+  ctx.save();
+  ctx.translate(sway, -18 + bob);
+  ctx.scale(1 + pop*0.13, 1 - pop*0.15);
+  const rot = state.time*0.14 + p.anim*0.3;
+  petalRing(12, 9, 27.5, rot + 0.26, Gr.petalB, 'rgba(226,146,38,.5)');
+  petalRing(12, 9, 24, rot, Gr.petalF, 'rgba(240,164,44,.55)');
+  ctx.fillStyle = Gr.core; ell(0, 0, 15, 14); ctx.fill();
+  ctx.strokeStyle = 'rgba(150,92,32,.8)'; ctx.lineWidth = 2; ell(0,0,15,14); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.13)'; ell(-4, -6.5, 8, 3.6); ctx.fill();
+  drawCartoonFace(0, -0.5, p, 1.02, false);
+  ctx.restore();
+
+  drawPlantTimer(p, sway, -42 + bob);
 }
 
 function drawPeashooter(sway, p){
-  const rec = p.recoil * 5;
-  ctx.strokeStyle = COL.stem; ctx.lineWidth = 7; ctx.lineCap='round';
-  ctx.beginPath(); ctx.moveTo(0, 28); ctx.quadraticCurveTo(sway*0.5, 8, sway*0.6 - 2, -6); ctx.stroke();
-  ctx.fillStyle = COL.leaf;
-  ctx.save(); ctx.translate(-11, 15); ctx.rotate(-0.6); ell(0,0,12,6); ctx.fill(); ctx.restore();
+  const rec = p.recoil * 3.5;
+  drawStem(sway*0.5 - 1 - rec*0.4, -5, sway);
+  drawLeaf(-8, 20, -0.55, 15);
+  drawLeaf(7, 24, 0.6, 12);
 
-  const hx = sway*0.6 - 2 - rec, hy = -16;
-  ctx.fillStyle = COL.pea; ell(hx, hy, 17, 15); ctx.fill();
-  ctx.fillStyle = 'rgba(255,255,255,.25)'; ell(hx-5, hy-6, 6, 4); ctx.fill();
-  // 炮口
-  ctx.fillStyle = COL.peaDark;
-  rr(hx + 10, hy - 8 - rec*0.3, 16, 15, 6); ctx.fill();
-  ctx.fillStyle = '#2f5c14';
-  ell(hx + 25, hy - 0.5 - rec*0.3, 4.4, 6.2); ctx.fill();
-  // 眼
-  ctx.fillStyle = '#12320a';
-  ell(hx + 2, hy - 3, 2.2, 2.8); ctx.fill();
-  ctx.fillStyle = 'rgba(255,255,255,.85)';
-  ell(hx + 1.4, hy - 4, 1, 1.2); ctx.fill();
+  ctx.save();
+  ctx.translate(sway*0.5 - 1 - rec, -19);
+  ctx.scale(1 + p.recoil*0.07, 1 - p.recoil*0.07);
+  // 头顶小嫩芽
+  ctx.fillStyle = '#63c237';
+  ctx.beginPath();
+  ctx.moveTo(-1, -15); ctx.quadraticCurveTo(-6, -25, 2, -26.5);
+  ctx.quadraticCurveTo(6, -19, 2, -14.5); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#3a8c22'; ctx.lineWidth = 1.6; ctx.stroke();
+  // 后脑小圆叶
+  ctx.fillStyle = '#57b934';
+  for (let i=0;i<4;i++){
+    const a = Math.PI*0.68 + i*0.28;
+    ell(Math.cos(a)*15, Math.sin(a)*-13, 5.6, 3.6); ctx.fill();
+  }
+  // 圆脑袋
+  ctx.fillStyle = Gr.peaHead; ell(0, 0, 18, 17); ctx.fill();
+  ctx.strokeStyle = '#3a8c22'; ctx.lineWidth = 2.4; ell(0,0,18,17); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.38)'; ell(-6.5, -9, 6.6, 3.8); ctx.fill();
+  // 短炮口
+  ctx.fillStyle = Gr.peaSnout; rr(10, -8.5, 16, 17, 8); ctx.fill();
+  ctx.strokeStyle = '#3a8c22'; ctx.lineWidth = 2.2; rr(10,-8.5,16,17,8); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.3)'; rr(13, -7, 10, 3.2, 1.6); ctx.fill();
+  ctx.fillStyle = '#2f7018'; ell(25, 0, 4.4, 6.2); ctx.fill();
+  ctx.fillStyle = '#17400a'; ell(25.2, 0.5, 2.6, 4.2); ctx.fill();
+  // 大眼睛（朝右瞄）
+  const blink = ((state.time*0.9 + p.anim) % 4.6) > 4.35;
+  ctx.fillStyle = '#fffdf2';
+  ell(-1.6, -2.6, 5.6, blink ? 1 : 6.2); ctx.fill();
+  ell(7.8, -2.2, 4.1, blink ? 0.8 : 4.7); ctx.fill();
+  if (!blink){
+    ctx.fillStyle = '#3a3227';
+    ell(-0.4, -2.0, 3.3, 3.9); ctx.fill();
+    ell(8.6, -1.7, 2.4, 2.9); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ell(-2.1, -4.2, 1.6, 1.7); ctx.fill();
+    ell(7.3, -3.4, 1.1, 1.2); ctx.fill();
+    ell(1.1, 0.2, 0.8, 0.9); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(255,120,105,.34)'; ell(-9.5, 5.5, 3.4, 2.1); ctx.fill();
+  ctx.restore();
 }
 
 function drawPlantTimer(p, x, y){
   if (p.def.kind !== 'sun') return;
   const f = 1 - clamp(p.timer / FLOWER_EVERY, 0, 1);
   ctx.save();
-  ctx.globalAlpha = 0.55;
-  ctx.fillStyle = 'rgba(0,0,0,.35)'; rr(x-13, y, 26, 5, 2.5); ctx.fill();
-  ctx.fillStyle = COL.sun; rr(x-13, y, 26*f, 5, 2.5); ctx.fill();
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; rr(x-12, y, 24, 4.5, 2.2); ctx.fill();
+  ctx.fillStyle = COL.sun; rr(x-12, y, 24*f, 4.5, 2.2); ctx.fill();
   ctx.restore();
 }
 
@@ -848,121 +963,256 @@ function drawGhostPlant(){
   const { r, c } = state.hover.cell;
   if (state.plants.some(p => p.r===r && p.c===c)) return;
   const pos = cellCenter(r,c);
-  const fake = { key: state.selected, x: pos.x, y: pos.y, anim: 0, timer: 999, def: PLANT_DEFS[state.selected], flash:0, recoil:0, r, c };
+  const fake = { key: state.selected, x: pos.x, y: pos.y, anim: 0, timer: 999, def: PLANT_DEFS[state.selected], flash:0, recoil:0, pop:0, r, c };
   drawPlantBody(fake, 0.5);
 }
 
-/* ------------------------------ 绘制：僵尸 ------------------------------ */
+/* ------------------------------ 绘制：僵尸（Q 版大头） ------------------------------ */
+function zLeg(step, back){
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = back ? '#7fae5c' : '#9cc777';
+  ctx.lineWidth = back ? 8 : 9;
+  const fx = (back ? -4 : 5) + step;
+  ctx.beginPath(); ctx.moveTo(back ? 3 : -3, -18); ctx.lineTo(fx, -6); ctx.stroke();
+  ctx.fillStyle = back ? '#6b7684' : '#7f8b9a';        // 圆圆的小鞋
+  ell(fx - 2.5, -4.5, 7.6, 4.8); ctx.fill();
+  ctx.strokeStyle = '#4d5663'; ctx.lineWidth = 1.6; ell(fx-2.5, -4.5, 7.6, 4.8); ctx.stroke();
+}
+
+function zTorso(z, wound){
+  ctx.save();
+  ctx.translate(0, -29);
+  ctx.fillStyle = Gr.zCoat;
+  ell(0, 0, 14.5, 15); ctx.fill();
+  ctx.strokeStyle = '#4d5663'; ctx.lineWidth = 2.2; ell(0,0,14.5,15); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.18)'; ell(-5, -6.5, 6.6, 4); ctx.fill();
+  // 白衬衫小三角 + 松开的领带
+  ctx.fillStyle = Gr.zShirt;
+  ctx.beginPath(); ctx.moveTo(-5.5, -12.8); ctx.lineTo(5.5, -12.8); ctx.lineTo(0, -2); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#ef6a5c';
+  ctx.beginPath();
+  ctx.moveTo(0, -11.5); ctx.lineTo(2.8, -8.4); ctx.lineTo(1.5, 1.6); ctx.lineTo(-1.5, 1.6); ctx.lineTo(-2.8, -8.4);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(170,60,52,.55)'; ctx.lineWidth = 1.2; ctx.stroke();
+  if (wound > 0.5){                                  // 打急了蹭破一块
+    ctx.fillStyle = 'rgba(255,255,255,.5)';
+    ell(7, 4, 3.4, 2.6); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function zArm(z, t, back, col){
+  const phase = t*3.2 + (back ? Math.PI : 0);
+  const swing = z.eating ? Math.sin(t*9 + (back ? Math.PI : 0))*4 : Math.sin(phase)*2;
+  const handX = back ? -17 : -23;
+  const handY = (back ? -26 : -30) + swing;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = col; ctx.lineWidth = back ? 7 : 8;
+  ctx.beginPath(); ctx.moveTo(back ? 6 : -4, -34); ctx.lineTo(handX, handY); ctx.stroke();
+  ctx.fillStyle = col; ell(handX - 2.5, handY, 5.8, 5.4); ctx.fill();      // 圆手套
+  ctx.strokeStyle = '#4e7a38'; ctx.lineWidth = 1.7; ell(handX-2.5, handY, 5.8, 5.4); ctx.stroke();
+  ctx.fillStyle = col;
+  for (let i=-1;i<=1;i++){ ell(handX - 7.5, handY + i*3.1, 2.2, 2.2); ctx.fill(); }   // 三根小指头
+}
+
+function drawZombieEye(x, y, r, cross, t){
+  ctx.save(); ctx.translate(x, y);
+  if (cross){
+    ctx.strokeStyle = '#3f4a30'; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-r*0.62, -r*0.62); ctx.lineTo(r*0.62, r*0.62);
+    ctx.moveTo(r*0.62, -r*0.62); ctx.lineTo(-r*0.62, r*0.62);
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = '#fffdf2'; ell(0, 0, r, r*1.06); ctx.fill();
+    ctx.strokeStyle = 'rgba(80,110,60,.45)'; ctx.lineWidth = 1.2; ell(0,0,r,r*1.06); ctx.stroke();
+    ctx.fillStyle = '#3a3227'; ell(-r*0.3, r*0.14, r*0.52, r*0.58); ctx.fill();
+    ctx.fillStyle = '#fff'; ell(-r*0.52, -r*0.34, r*0.25, r*0.27); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function zHead(z, hy, tilt, wound, t){
+  const dying = z.dying > 0;
+  ctx.save();
+  ctx.translate(-1.5, hy); ctx.rotate(tilt);
+  // 耳朵
+  ctx.fillStyle = '#9cc777'; ell(18, -1, 4.2, 5.4); ctx.fill();
+  ctx.strokeStyle = '#4e7a38'; ctx.lineWidth = 1.8; ell(18,-1,4.2,5.4); ctx.stroke();
+  // 大脑袋
+  ctx.fillStyle = Gr.zSkin; ell(0, 0, 19.5, 18.5); ctx.fill();
+  ctx.strokeStyle = '#4e7a38'; ctx.lineWidth = 2.4; ell(0,0,19.5,18.5); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.24)'; ell(-6, -10, 8.4, 4.6); ctx.fill();
+  // 三根呆毛
+  ctx.strokeStyle = '#6d8550'; ctx.lineWidth = 2.6; ctx.lineCap = 'round';
+  for (let i=0;i<3;i++){
+    ctx.beginPath(); ctx.moveTo(-7 + i*6, -17);
+    ctx.quadraticCurveTo(-5.5 + i*6, -23.5, -1.5 + i*6, -18.5); ctx.stroke();
+  }
+  // 眼：伤重或阵亡变叉眼
+  const cross = dying || wound > 0.68;
+  drawZombieEye(-7.5, -3.5, 5.8, false, t);
+  drawZombieEye( 5, -4.2, 4.7, cross, t);
+  // 一高一低的呆眉毛
+  ctx.strokeStyle = '#5f7346'; ctx.lineWidth = 2.7; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-12.5, -10.8); ctx.lineTo(-3.5, -12.2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(1.5, -12.0); ctx.lineTo(9, -9.6); ctx.stroke();
+  // 鼻头
+  ctx.fillStyle = 'rgba(96,132,66,.6)'; ell(-14, 2, 2.6, 2.2); ctx.fill();
+  // 傻笑 + 两颗门牙
+  const open = z.eating ? 4 + Math.abs(Math.sin(t*9))*5 : 3;
+  ctx.fillStyle = '#8a4f4f'; rr(-12.5, 6, 18, open, 3); ctx.fill();
+  ctx.strokeStyle = '#4e7a38'; ctx.lineWidth = 1.6; rr(-12.5, 6, 18, open, 3); ctx.stroke();
+  ctx.fillStyle = '#fffdf2';
+  const th = Math.min(4.6, open*1.2);
+  rr(-10, 6.4, 4.8, th, 1.8); ctx.fill();
+  rr(-3.6, 6.4, 4.8, th, 1.8); ctx.fill();
+  ctx.restore();
+}
+
+function zConeHat(hy, af){
+  ctx.save();
+  ctx.translate(-1.5, hy); ctx.rotate(0.1); ctx.translate(0, -16);
+  ctx.fillStyle = Gr.cone;
+  ctx.beginPath();
+  ctx.moveTo(-11, 0); ctx.lineTo(10, 0);
+  if (af < 0.55){ ctx.lineTo(3, -13); ctx.lineTo(0, -9.5); ctx.lineTo(-3.5, -15); }
+  else ctx.lineTo(-0.5, -26);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#c2670f'; ctx.lineWidth = 2; ctx.stroke();
+  if (af > 0.35){ ctx.fillStyle = '#fff6e2'; rr(-7.8, -11.6, 14.6, 4.8, 1.8); ctx.fill(); }
+  ctx.fillStyle = '#f2811b'; rr(-12.5, -2.6, 23, 5.2, 2.6); ctx.fill();
+  ctx.strokeStyle = '#c2670f'; ctx.lineWidth = 1.6; rr(-12.5,-2.6,23,5.2,2.6); ctx.stroke();
+  ctx.restore();
+}
+
+function zBucketHat(hy, af){
+  ctx.save();
+  ctx.translate(-1.5, hy); ctx.rotate(-0.06); ctx.translate(0, -15);
+  ctx.fillStyle = Gr.bucket;
+  ctx.beginPath();
+  ctx.moveTo(-13, -11); ctx.lineTo(12, -11);
+  ctx.quadraticCurveTo(11, 7.5, 0, 7.5); ctx.quadraticCurveTo(-11, 7.5, -13, -11);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#5b6973'; ctx.lineWidth = 2.2; ctx.stroke();
+  ctx.fillStyle = Gr.rim; rr(-14.5, -14.6, 29, 5.8, 2.9); ctx.fill();
+  ctx.strokeStyle = '#5b6973'; ctx.lineWidth = 1.8; rr(-14.5,-14.6,29,5.8,2.9); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.55)'; rr(-9, -7.5, 4, 12, 2); ctx.fill();
+  if (af < 0.7){
+    ctx.strokeStyle = 'rgba(70,86,96,.85)'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-5, -8.5); ctx.lineTo(-1, -2); ctx.lineTo(-6, 3); ctx.stroke();
+  }
+  if (af < 0.4){ ctx.fillStyle = 'rgba(60,76,86,.9)'; ell(5.5, -4.5, 3.4, 2.6); ctx.fill(); }
+  ctx.restore();
+}
+
+function zRunnerGear(hy, tilt, t){
+  ctx.save();
+  ctx.translate(-1.5, hy); ctx.rotate(tilt);
+  ctx.fillStyle = '#ef5b4c'; rr(-19.5, -11, 39, 6.8, 3.4); ctx.fill();
+  ctx.strokeStyle = '#b93b2f'; ctx.lineWidth = 1.7; rr(-19.5,-11,39,6.8,3.4); ctx.stroke();
+  ctx.fillStyle = '#ef5b4c';                                   // 飘带
+  ctx.beginPath();
+  ctx.moveTo(17, -9.5);
+  ctx.quadraticCurveTo(27, -14 + Math.sin(t*8)*2.5, 32, -7);
+  ctx.lineTo(24, -4); ctx.closePath(); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = 'rgba(255,178,96,.5)';                       // 身后速度线
+  for (let i=0;i<3;i++){ rr(21 + i*8, -68 + i*14, 13 + i*5, 3.6, 1.8); ctx.fill(); }
+}
+
 function drawZombie(z){
   const s = z.scale;
-  const walking = !z.eating && z.dying <= 0;
-  const t = z.anim;
-  const bob = walking ? Math.abs(Math.sin(t*3.2)) * 3 : (z.eating ? Math.sin(t*9)*1.6 : 0);
   const dead = z.dying > 0;
   const dp = dead ? clamp(z.dying/1.1, 0, 1) : 0;
+  const t = z.anim;
+  const walking = !z.eating && !dead;
+  const bob = walking ? Math.abs(Math.sin(t*3.2)) * 3 : (z.eating ? Math.sin(t*9)*1.8 : 0);
+  const wound = z.maxHp > 0 ? clamp(1 - z.hp/z.maxHp, 0, 1) : 0;
+  const af = z.maxArmor > 0 ? clamp(z.armor/z.maxArmor, 0, 1) : 0;
+  const lean = (z.type === 'runner' && !dead) ? -0.12 : 0;
 
   ctx.save();
   ctx.globalAlpha = 1 - dp;
   ctx.translate(z.x, z.feetY - bob);
-  ctx.rotate(dead ? dp * 0.85 : (z.eating ? Math.sin(t*9)*0.03 : Math.sin(t*3.2)*0.02));
+  ctx.rotate((dead ? dp*1.25 : (z.eating ? Math.sin(t*9)*0.035 : Math.sin(t*3.2)*0.02)) + lean);
   ctx.scale(s, s);
 
-  // 影子
-  ctx.fillStyle = 'rgba(0,0,0,.28)'; ell(0, 2 + bob, 20, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.2)'; ell(0, 2 + bob, 20, 6.5); ctx.fill();
 
-  const hurt = z.maxHp > 0 ? 1 - z.hp/z.maxHp : 0;
-  const skin = mix('#a7b78d', '#5c5148', hurt*0.8);
-  const cloth = mix('#78866c', '#413f39', hurt*0.8);
+  const step = walking ? Math.sin(t*3.2)*5.5 : (z.eating ? 1.5 : 0);
+  const skin = mix('#a9cf7e', '#8e9c80', wound*0.7);
+  const skinDark = mix('#84b462', '#71806a', wound*0.7);
 
-  // 腿
-  ctx.strokeStyle = '#3c4536'; ctx.lineWidth = 8; ctx.lineCap='round';
-  const step = walking ? Math.sin(t*3.2)*4.5 : 0;
-  ctx.beginPath(); ctx.moveTo(-3, 0); ctx.lineTo(-5 - step, -20); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(3, 0); ctx.lineTo(5 + step, -20); ctx.stroke();
+  zLeg(-step, true);
+  zLeg(step, false);
+  zTorso(z, wound);
+  zArm(z, t, true, skinDark);
 
-  // 身体（破衬衫）
-  ctx.fillStyle = cloth;
-  rr(-13, -44, 26, 30, 8); ctx.fill();
-  ctx.fillStyle = 'rgba(0,0,0,.18)';
-  ctx.fillRect(-13, -30, 26, 3);
-  ctx.strokeStyle = 'rgba(0,0,0,.25)'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(-8, -42); ctx.lineTo(-3, -34); ctx.lineTo(-9, -26); ctx.stroke();
-
-  // 手臂（朝左前方伸出，吃东西时上下摆）
-  const armY = z.eating ? -30 + Math.sin(t*9)*5 : -32 + Math.sin(t*3.2)*1.5;
-  ctx.strokeStyle = skin; ctx.lineWidth = 7;
-  ctx.beginPath(); ctx.moveTo(-8, -34); ctx.lineTo(-24, armY); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(6, -34); ctx.lineTo(-18, armY + 5); ctx.stroke();
-  ctx.fillStyle = skin;
-  ell(-25, armY, 4.6, 4.2); ctx.fill();
-  ell(-19, armY+5, 4.4, 4.2); ctx.fill();
-
-  // 头
-  const headY = -54 + (z.eating ? Math.sin(t*9)*1.5 : 0);
-  ctx.fillStyle = skin;
-  ell(-1, headY, 13, 14); ctx.fill();
-  ctx.fillStyle = mix('#c7d3ad', '#6d6459', hurt*0.8);
-  ell(-3, headY - 3, 8, 7); ctx.fill();
-  // 五官
-  ctx.fillStyle = '#1e1b16';
-  ell(-8, headY - 3, 2.4, 2.0); ctx.fill();
-  ell(-1, headY - 4, 2.2, 1.8); ctx.fill();
-  ctx.strokeStyle = '#241f19'; ctx.lineWidth = 1.4;
-  ctx.beginPath(); ctx.moveTo(-12, headY - 8); ctx.lineTo(-5, headY - 7); ctx.stroke();
-  // 嘴（咬牙）
-  ctx.fillStyle = '#2a2018';
-  if (z.eating){
-    const open = 2 + Math.abs(Math.sin(t*9))*3.5;
-    rr(-11, headY + 3, 15, open, 2); ctx.fill();
-    ctx.fillStyle = '#efe7d2';
-    ctx.fillRect(-10, headY + 3, 3, 2); ctx.fillRect(-4, headY + 3, 3, 2); ctx.fillRect(2, headY+3, 3, 2);
-  } else {
-    rr(-10, headY + 4, 13, 3, 1.5); ctx.fill();
+  const headY = -52 + (z.eating ? Math.sin(t*9)*2 : 0);
+  const tilt  = z.eating ? Math.sin(t*9)*0.06 : Math.sin(t*3.2)*0.025;
+  zHead(z, headY, tilt, wound, t);
+  if (z.maxArmor > 0 && z.armor > 0){
+    if (z.type === 'cone') zConeHat(headY, af);
+    else if (z.type === 'bucket') zBucketHat(headY, af);
   }
+  if (z.type === 'runner') zRunnerGear(headY, tilt, t);
 
-  // 护具
-  if (z.armor > 0 && z.maxArmor > 0){
-    const af = z.armor / z.maxArmor;
-    if (z.type === 'cone'){
-      ctx.fillStyle = mix('#e59a28', '#8f5f19', (1-af)*0.7);
-      ctx.beginPath();
-      ctx.moveTo(-11, headY - 12); ctx.lineTo(6, headY - 12); ctx.lineTo(-3, headY - 35);
-      ctx.closePath(); ctx.fill();
-      ctx.fillStyle = 'rgba(0,0,0,.2)'; ctx.fillRect(-11, headY-14, 17, 3);
-      if (af < 0.6){ ctx.strokeStyle='rgba(60,30,0,.6)'; ctx.lineWidth=1.5;
-        ctx.beginPath(); ctx.moveTo(-7, headY-13); ctx.lineTo(-3, headY-25); ctx.stroke(); }
-    } else if (z.type === 'bucket'){
-      ctx.fillStyle = mix('#b9c3c9', '#7d878d', (1-af)*0.7);
-      rr(-13, headY - 26, 22, 18, 3); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(-11, headY - 24, 3, 14);
-      ctx.strokeStyle = 'rgba(0,0,0,.3)'; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(-13, headY - 18); ctx.lineTo(9, headY - 18); ctx.stroke();
-      if (af < 0.6){ ctx.strokeStyle='rgba(40,50,60,.7)';
-        ctx.beginPath(); ctx.moveTo(-4, headY-26); ctx.lineTo(0, headY-14); ctx.lineTo(-6, headY-9); ctx.stroke(); }
-    }
-  }
-  if (z.type === 'runner'){
-    ctx.fillStyle = 'rgba(255,120,60,.85)';
-    ctx.fillRect(16, headY - 20, 12, 4);
-    ctx.fillRect(20, headY - 12, 10, 4);
-  }
+  zArm(z, t, false, skin);
 
   if (z.hitFlash > 0){
-    ctx.globalAlpha = (1-dp) * Math.min(1, z.hitFlash) * 0.5;
-    ctx.fillStyle = '#fff'; ell(-1, headY, 14, 15); ctx.fill();
-    ell(0, -30, 16, 18); ctx.fill();
+    ctx.globalAlpha = (1-dp) * Math.min(1, z.hitFlash) * 0.42;
+    ctx.fillStyle = '#fff';
+    ell(-1.5, headY, 19, 18); ctx.fill();
+    ell(0, -29, 15, 15.5); ctx.fill();
   }
   ctx.restore();
+
+  // 阵亡：脑袋弹出，眼睛变成叉，旁边冒两颗小星星
+  if (dead){
+    const tt = z.dying;
+    const hx = z.x + 6 + tt*52, hy = z.feetY - 56 - (112*tt - 250*tt*tt);
+    ctx.save();
+    ctx.globalAlpha = clamp(1 - dp, 0, 1);
+    ctx.translate(hx, hy); ctx.rotate(tt*5);
+    ctx.fillStyle = mix('#a9cf7e', '#8e9c80', 0.6); ell(0, 0, 16, 15); ctx.fill();
+    ctx.strokeStyle = '#4e7a38'; ctx.lineWidth = 2.2; ell(0,0,16,15); ctx.stroke();
+    ctx.strokeStyle = '#3f4a30'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-9, -6); ctx.lineTo(-3.5, -0.5); ctx.moveTo(-3.5, -6); ctx.lineTo(-9, -0.5);
+    ctx.moveTo(3, -6.5); ctx.lineTo(8.5, -1); ctx.moveTo(8.5, -6.5); ctx.lineTo(3, -1);
+    ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = clamp(1 - dp*1.15, 0, 1) * 0.9;
+    ctx.fillStyle = '#ffe36b';
+    for (let i=0;i<2;i++){
+      const a = tt*4 + i*Math.PI;
+      drawStar(hx + Math.cos(a)*24, hy - 20 + Math.sin(a)*9, 4.4);
+    }
+    ctx.restore();
+  }
 
   // 血条
   if (z.dying <= 0 && (z.hp < z.maxHp || z.armor < z.maxArmor)){
     const total = (z.maxHp + z.maxArmor) || 1;
-    const bx = z.x - 20, by = z.feetY - 94;
-    ctx.fillStyle = 'rgba(0,0,0,.5)'; rr(bx, by, 40, 6, 3); ctx.fill();
-    const wBody = 38 * (Math.max(0,z.hp)/total), wArm = 38 * (Math.max(0,z.armor)/total);
-    ctx.fillStyle = '#e2554a'; rr(bx+1, by+1, Math.max(1,wBody), 4, 2); ctx.fill();
-    if (wArm > 0.6){ ctx.fillStyle = '#c3ccd2'; rr(bx+1+wBody, by+1, wArm, 4, 2); ctx.fill(); }
+    const bx = z.x - 21, by = z.feetY - 106;
+    ctx.fillStyle = 'rgba(30,40,25,.55)'; rr(bx-1, by-1, 44, 8, 4); ctx.fill();
+    const wBody = 42 * (Math.max(0,z.hp)/total), wArm = 42 * (Math.max(0,z.armor)/total);
+    ctx.fillStyle = '#ff7d6b'; rr(bx+1, by+1, Math.max(1.5, wBody), 4, 2); ctx.fill();
+    if (wArm > 0.8){ ctx.fillStyle = '#cfd9e2'; rr(bx+1+wBody, by+1, wArm, 4, 2); ctx.fill(); }
   }
+}
+
+function drawStar(x, y, r){
+  ctx.beginPath();
+  for (let i=0;i<10;i++){
+    const a = i/10*Math.PI*2 - Math.PI/2;
+    const rr2 = i % 2 ? r*0.45 : r;
+    if (i === 0) ctx.moveTo(x + Math.cos(a)*rr2, y + Math.sin(a)*rr2);
+    else ctx.lineTo(x + Math.cos(a)*rr2, y + Math.sin(a)*rr2);
+  }
+  ctx.closePath(); ctx.fill();
 }
 
 function mix(c1, c2, t){
@@ -978,12 +1228,12 @@ function hexToRgb(h){
 /* ------------------------------ 绘制：豌豆 / 阳光 / 粒子 ------------------------------ */
 function drawPea(pea){
   ctx.save();
-  ctx.fillStyle = 'rgba(0,0,0,.18)';
-  ell(pea.x, pea.y + 26, 7, 3); ctx.fill();
-  ctx.fillStyle = COL.pea; ell(pea.x, pea.y, pea.r, pea.r); ctx.fill();
-  ctx.fillStyle = 'rgba(255,255,255,.55)'; ell(pea.x-3, pea.y-3, 3, 2.4); ctx.fill();
-  ctx.strokeStyle = COL.peaDark; ctx.lineWidth = 1.5;
-  ell(pea.x, pea.y, pea.r, pea.r); ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,.16)'; ell(pea.x, pea.y + 27, 7, 2.6); ctx.fill();
+  ctx.fillStyle = 'rgba(150,220,90,.26)'; ell(pea.x - 9, pea.y, 7.5, 4.2); ctx.fill();   // 拖尾
+  ctx.translate(pea.x, pea.y);
+  ctx.fillStyle = Gr.peaBall; ell(0, 0, pea.r, pea.r); ctx.fill();
+  ctx.strokeStyle = '#2f6413'; ctx.lineWidth = 1.4; ell(0, 0, pea.r, pea.r); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.72)'; ell(-2.6, -3, 2.4, 1.7); ctx.fill();
   ctx.restore();
 }
 
@@ -991,18 +1241,29 @@ function drawSunIcon(x, y, r, spin, alpha=1){
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.translate(x,y); ctx.rotate(spin);
-  const g = ctx.createRadialGradient(0,0,r*0.2, 0,0, r*2.1);
-  g.addColorStop(0,'rgba(255,240,120,.75)'); g.addColorStop(1,'rgba(255,200,60,0)');
-  ctx.fillStyle = g; ell(0,0,r*2.1,r*2.1); ctx.fill();
-  for (let i=0;i<8;i++){
+  const glow = ctx.createRadialGradient(0,0,r*0.2, 0,0, r*2.2);
+  glow.addColorStop(0,'rgba(255,246,150,.8)');
+  glow.addColorStop(0.5,'rgba(255,206,70,.32)');
+  glow.addColorStop(1,'rgba(255,180,40,0)');
+  ctx.fillStyle = glow; ell(0,0,r*2.2,r*2.2); ctx.fill();
+  for (let i=0;i<8;i++){                                   // 长芒
     ctx.save(); ctx.rotate(i/8*Math.PI*2);
-    ctx.fillStyle = '#ffd23c';
-    ctx.beginPath(); ctx.moveTo(-3.2, -r*0.9); ctx.lineTo(3.2, -r*0.9); ctx.lineTo(0, -r*1.7); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#ffcf33';
+    ctx.beginPath(); ctx.moveTo(-3.4, -r*0.86); ctx.lineTo(3.4, -r*0.86); ctx.lineTo(0, -r*1.78); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(214,132,16,.5)'; ctx.lineWidth = 1; ctx.stroke();
     ctx.restore();
   }
-  ctx.fillStyle = COL.sun; ell(0,0,r,r); ctx.fill();
-  ctx.fillStyle = COL.sunDeep; ell(0, r*0.18, r*0.72, r*0.72); ctx.fill();
-  ctx.fillStyle = '#fff6b0'; ell(-r*0.22,-r*0.22, r*0.4, r*0.34); ctx.fill();
+  for (let i=0;i<8;i++){                                   // 短芒
+    ctx.save(); ctx.rotate((i+0.5)/8*Math.PI*2);
+    ctx.fillStyle = '#ffe873';
+    ctx.beginPath(); ctx.moveTo(-2.2, -r*0.86); ctx.lineTo(2.2, -r*0.86); ctx.lineTo(0, -r*1.32); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  const core = ctx.createRadialGradient(-r*0.3, -r*0.35, r*0.15, 0, 0, r*1.12);
+  core.addColorStop(0,'#fffce4'); core.addColorStop(0.45,'#ffdf5a'); core.addColorStop(1,'#ef9717');
+  ctx.fillStyle = core; ell(0,0,r,r); ctx.fill();
+  ctx.strokeStyle = 'rgba(198,118,14,.6)'; ctx.lineWidth = Math.max(1, r*0.09); ell(0,0,r,r); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.72)'; ell(-r*0.3, -r*0.44, r*0.26, r*0.15); ctx.fill();
   ctx.restore();
 }
 
@@ -1356,6 +1617,7 @@ function resize(){
 function boot(){
   canvas = document.getElementById('game');
   ctx = canvas.getContext('2d');
+  buildGradients();
   resetState();
   resize();
   window.addEventListener('resize', resize);
